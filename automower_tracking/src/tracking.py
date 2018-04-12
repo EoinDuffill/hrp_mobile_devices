@@ -15,9 +15,8 @@ class automower_tracking(object):
 	
 	def init(self):
 		#Update rate in Hz
-		self.update_rate = 1
-		self.update_display_rate = 2
-		self.clock_internal = 0
+		self.update_rate = 5
+		self.experiment_number = 1
 		#State variables set by the experiment/status topic, influences the experiment_running state var
 		self.experiment_shutting_down = False
 		self.experiment_starting_up = False
@@ -30,9 +29,14 @@ class automower_tracking(object):
  	   	self.pub_experiment_data = rospy.Publisher('experiment/data', Float32MultiArray, queue_size=1)
 
 		self.file_path = '/home/eoin/ROS/catkin_ws/src/figure'
-		
-		#Initialise an initial experiment
-		self.init_experiment()
+
+		#init vars
+		self.wheel_l_accum = 0
+		self.wheel_r_accum = 0
+		self.prev_tick = None
+		self.x = 0
+		self.y = 0
+		self.orientation = 0
 		
 	def init_experiment(self):
 		self.file = open("results", "a")
@@ -44,9 +48,9 @@ class automower_tracking(object):
 		self.x = 0
 		self.y = 0
 
-		print("Starting Experiment...")
+		print("Starting Experiment " + str(self.experiment_number) + "...")
 		#Write to file with starting co-ords
-		self.file.write("\nStart: x = " + str(self.x) + "y = " + str(self.y) + "theta = " + str(self.orientation) + "\n")
+		self.file.write("\nStart Experiment "+ str(self.experiment_number) +": x = " + str(self.x) + "y = " + str(self.y) + "theta = " + str(self.orientation) + "\n")
 
 		self.wheel_l_accum = 0
 		self.wheel_r_accum = 0
@@ -61,6 +65,7 @@ class automower_tracking(object):
 		self.y_odom_points = []
 
 		self.experiment_running = True
+		self.experiment_number += 1
 
 	def wheel_encoder(self, data):
 
@@ -136,6 +141,7 @@ class automower_tracking(object):
 			#Setup subscribers
 			rospy.Subscriber("wheel_encoder", WheelEncoder, self.wheel_encoder, queue_size=None)
 			rospy.Subscriber('experiment/status', Float32, self.update_status)
+			r = rospy.Rate(self.update_rate)
 			while not rospy.is_shutdown():
 				#When experiment is running...
 				if(self.experiment_running):
@@ -147,11 +153,9 @@ class automower_tracking(object):
 						self.update()
 					#Else the experiment has finished
 					else:
-						#Reset clock so last update calculates a finishing position and orientation
-						self.clock_internal = 0
-						self.update()
 						self.finish_experiment()
 						self.idle()
+					r.sleep()
 				#While experiment is fininished wait or start command
 				else:
 					if(self.experiment_starting_up):
@@ -166,13 +170,9 @@ class automower_tracking(object):
 			self.fini()
 
 	def update(self):
-		#write data (odom calculations etc) based on display rate and clock
-		if (self.clock_internal % (self.update_display_rate) == 0):
-			self.write_data()
-			self.publish_experiment_data(1.0)
-		
-		#Increment internal clock
-		self.clock_internal += 1
+		#write data (odom calculations etc)
+		self.write_data()
+		self.publish_experiment_data(1.0)
 
 	def write_data(self):
 		#Get initial variables from simulator

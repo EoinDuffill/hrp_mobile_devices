@@ -14,24 +14,28 @@ class automower_tracking_simulator(object):
 
 	def init(self):
 		#Update rate in Hz
-		self.update_rate = 1
-		self.update_display_rate = 2
-		self.clock_internal = 0
+		self.update_rate = 5
+		self.experiment_number = 1
 		#State variables set by the experiment/status topic, influences the experiment_running state var
 		self.experiment_shutting_down = False
 		self.experiment_starting_up = False
 		#State variable about experiment current status
 		self.experiment_running = False
+		#defualt experiment length
 		self.experiment_run_time = 10
 		#Distance between the centers of the rear wheels
 		self.wheel_separation_distance = 0.48
 		#Setup experiment data publisher
  	   	self.pub_experiment_data = rospy.Publisher('experiment/data', Float32MultiArray, queue_size=1)
+		#init vars
+		self.wheel_l_accum = 0
+		self.wheel_r_accum = 0
+		self.prev_tick = None
+		self.x = 0
+		self.y = 0
+		self.orientation = 0
 
 		self.file_path = '/home/eoin/ROS/catkin_ws/src/figure'
-		
-		#Initialise an initial experiment
-		self.init_experiment()
 		
 	def init_experiment(self):
 		self.file = open("results", "a")
@@ -50,10 +54,11 @@ class automower_tracking_simulator(object):
 		self.y = data.pose[index].position.y
 		self.gps_y = data.pose[index].position.y
 
-		print("Starting Experiment...")
+		print("Starting Experiment " + str(self.experiment_number)+"...")
 		print(data.pose[index])
 		#Write to file with starting co-ords
-		self.file.write("\nStart: x = " + str(self.x) + "y = " + str(self.y) + "theta = " + str(self.orientation) + "\n")
+		self.file.write("\nExperiment No."+str(self.experiment_number))
+		self.file.write("\nStart: x = " + str(self.x) + " y = " + str(self.y) + " theta = " + str(self.orientation) + "\n")
 
 		self.wheel_l_accum = 0
 		self.wheel_r_accum = 0
@@ -72,6 +77,7 @@ class automower_tracking_simulator(object):
 		self.y_odom_points = []
 
 		self.experiment_running = True
+		self.experiment_number += 1
 		
 	def wheel_encoder(self, data):
 
@@ -157,6 +163,7 @@ class automower_tracking_simulator(object):
 			#Setup subscribers
 			rospy.Subscriber("wheel_encoder", WheelEncoder, self.wheel_encoder, queue_size=None)
 			rospy.Subscriber('experiment/status', Float32, self.update_status)
+			r = rospy.Rate(self.update_rate)
 			while not rospy.is_shutdown():
 				#When experiment is running...
 				if(self.experiment_running):
@@ -168,11 +175,9 @@ class automower_tracking_simulator(object):
 						self.update()
 					#Else the experiment has finished
 					else:
-						#Reset clock so last update calculates a finishing position and orientation
-						self.clock_internal = 0
-						self.update()
 						self.finish_experiment()
 						self.idle()
+					r.sleep()
 				#While experiment is fininished wait or start command
 				else:
 					if(self.experiment_starting_up):
@@ -187,13 +192,9 @@ class automower_tracking_simulator(object):
 			self.fini()
 
 	def update(self):
-		#write data (odom calculations etc) based on display rate and clock
-		if (self.clock_internal % (self.update_display_rate) == 0):
-			self.write_data()
-			self.publish_experiment_data(1.0)
-		
-		#Increment internal clock
-		self.clock_internal += 1
+		#write data (odom calculations etc)
+		self.write_data()
+		self.publish_experiment_data(1.0)
 
 	def write_data(self):
 		#Get initial variables from simulator
@@ -266,7 +267,7 @@ class automower_tracking_simulator(object):
 			plt.axis([np.amin(all_x_points) - 1, np.amax(all_x_points) + 1, np.amin(all_y_points) - 1, np.amax(all_y_points) + 1])
 			plt.savefig(self.file_path+'.png')
 			#Save the png as a JPEG
-			Image.open(self.file_path+'.png').save(self.file_path+'.jpg','JPEG')
+			image = Image.open(self.file_path+'.png').save(self.file_path+'.jpg','JPEG')
 			
 			#Running var set to false to signal the end of the experiment			
 			self.experiment_running = False
