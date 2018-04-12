@@ -37,30 +37,6 @@ int publishImage(std::string filepath)
     }
 }
 
-int publishImageWithoutImage_transport()
-{
-    ROS_INFO("Topic : %s", TOPIC_NAME.c_str());
-    ROS_INFO("IMAGE PATH : %s", IMAGE_PATH.c_str());
-    ros::NodeHandle nh;
-    std::string image_path = IMAGE_PATH;
-    cv_bridge::CvImage cv_image;
-    cv_image.image = cv::imread(image_path, CV_LOAD_IMAGE_COLOR);
-    cv_image.encoding = "bgr8";
-    sensor_msgs::Image ros_image;
-    cv_image.toImageMsg(ros_image);
-
-    ros::Publisher pub = nh.advertise<sensor_msgs::Image>(TOPIC_NAME, 1);
-    ros::Rate loop_rate(5);
-
-    while (nh.ok())
-    {
-        pub.publish(ros_image);
-        ros::spinOnce();
-        loop_rate.sleep();
-    }
-
-}
-
 int main(int argc, char** argv)
 {
     ros::init(argc, argv, "image_transport_publisher");
