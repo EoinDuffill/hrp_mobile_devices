@@ -5,7 +5,7 @@ import sys, os, tty, select
 import math, random
 import matplotlib.pyplot as plt
 import Image
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, Twist
 from gazebo_msgs.msg import ModelStates
 from am_driver.msg import WheelEncoder
 from std_msgs.msg import Float32, Float32MultiArray, MultiArrayDimension
@@ -14,20 +14,27 @@ class automower_tracking_simulator(object):
 
 	def init(self):
 		#Update rate in Hz
-		self.update_rate = 5
+		self.update_rate = 50
+		#Update figure in hz
+		self.figure_update_rate = 1
+		self.counter = 0
+		#Experiment counter, used to differentiate experiments
 		self.experiment_number = 1
+		#Experiment type
+		self.experiment_type = 1
 		#State variables set by the experiment/status topic, influences the experiment_running state var
 		self.experiment_shutting_down = False
 		self.experiment_starting_up = False
 		#State variable about experiment current status
 		self.experiment_running = False
-		#defualt experiment length
-		self.experiment_run_time = 10
 		#Distance between the centers of the rear wheels
 		self.wheel_separation_distance = 0.48
 		#Setup experiment data publisher
  	   	self.pub_experiment_data = rospy.Publisher('experiment/data', Float32MultiArray, queue_size=1)
+		#Publisher to navigate automower based on odometry (error calculation experiment)
+		self.pub_odom_navigation = rospy.Publisher('cmd_vel', Twist, queue_size=1)
 		#init vars
+		self.time = 0
 		self.wheel_l_accum = 0
 		self.wheel_r_accum = 0
 		self.prev_tick = None
@@ -35,10 +42,21 @@ class automower_tracking_simulator(object):
 		self.y = 0
 		self.orientation = 0
 
+		#Odometry error calculation variable init
+		self.experiment_side_length = 3.5
+		self.automower_vel = 0.3
+		self.automower_rot_vel = 0.3
+		self.stage = 0
+		self.stage_change = True
+		self.stage_init_x = 0
+		self.stage_init_y = 0
+		self.stage_init_ori = 0
+		self.twist = Twist()
+
 		self.file_path = '/home/eoin/ROS/catkin_ws/src/figure'
 		
 	def init_experiment(self):
-		self.file = open("results", "a")
+		self.file = open("results.txt", "a")
 
 		#Get initial variables from simulator
 		data = rospy.wait_for_message("gazebo/model_states", ModelStates)
@@ -54,7 +72,7 @@ class automower_tracking_simulator(object):
 		self.y = data.pose[index].position.y
 		self.gps_y = data.pose[index].position.y
 
-		print("Starting Experiment " + str(self.experiment_number)+"...")
+		print("Starting Experiment " + str(self.experiment_number)+" of Type: "+ str(self.experiment_type))
 		print(data.pose[index])
 		#Write to file with starting co-ords
 		self.file.write("\nExperiment No."+str(self.experiment_number))
@@ -76,9 +94,21 @@ class automower_tracking_simulator(object):
 		self.x_odom_points = []
 		self.y_odom_points = []
 
+		#init error calc experiment vars
+		if(self.experiment_type > 1):
+			self.stage = 0
+			self.stage_change = True
+			self.stage_init_x = 0
+			self.stage_init_y = 0
+			self.stage_init_ori = 0
+			self.twist = Twist()
+				
+
 		self.experiment_running = True
 		self.experiment_number += 1
-		
+
+
+
 	def wheel_encoder(self, data):
 
 		if not(self.prev_tick == None):
@@ -135,25 +165,23 @@ class automower_tracking_simulator(object):
 		mat = Float32MultiArray()
 		mat.layout.dim.append(MultiArrayDimension())
 		mat.layout.dim[0].label = "data"
-		mat.layout.dim[0].size = 7
+		mat.layout.dim[0].size = 6
 		mat.layout.dim[0].stride = 1
 		mat.layout.data_offset = 0
-		mat.data = [0]*7
+		mat.data = [0]*6
 		#experiement state, 0 = stopped
 		mat.data[0] = state
 		#time elapsed
 		if(state == 0):
-			mat.data[1] = self.experiment_run_time
+			mat.data[1] = 0
 		else:
 			mat.data[1] = self.time
-		#experiment run time
-		mat.data[2] = self.experiment_run_time
 		#X, Y and orientation data
-		mat.data[3] = self.x
-		mat.data[4] = self.y
-		mat.data[5] = self.orientation
+		mat.data[2] = self.x
+		mat.data[3] = self.y
+		mat.data[4] = self.orientation
 		#Error value
-		mat.data[6] = 0
+		mat.data[5] = 0
 		self.pub_experiment_data.publish(mat)
 
 	def run(self):
@@ -170,13 +198,9 @@ class automower_tracking_simulator(object):
 					#If command recieved to shutdown from /experiment/status finish experiment
 					if(self.experiment_shutting_down):
 						self.finish_experiment()
-					#Continue running experiment if time allows
-					elif(self.time < self.experiment_run_time):
-						self.update()
-					#Else the experiment has finished
+					#Loop experiment until cancelled
 					else:
-						self.finish_experiment()
-						self.idle()
+						self.update()
 					r.sleep()
 				#While experiment is fininished wait or start command
 				else:
@@ -192,9 +216,89 @@ class automower_tracking_simulator(object):
 			self.fini()
 
 	def update(self):
+	
 		#write data (odom calculations etc)
 		self.write_data()
 		self.publish_experiment_data(1.0)
+		
+		#Error experiment
+		if(self.experiment_type > 1):
+			self.odom_navigation()
+
+		self.counter += 1
+
+	def odom_navigation(self):
+		#If new stage (new rotation or forward phase) reset pos/orientation vars
+		if(self.stage_change):
+			self.stage += 1
+			self.stage_init_x = self.x
+			self.stage_init_y = self.y
+			self.stage_init_ori = self.orientation
+			#reset automower command
+			if(self.stage % 2 == 1):
+				self.twist.linear.x = self.automower_vel
+				self.twist.angular.z = 0
+				self.pub_odom_navigation.publish(self.twist)
+				#update figure only in start of rotation (not needed for than just the start)
+				self.plot_figure()
+			else:
+				self.twist.linear.x = 0
+				#Clockwise or anti-clockwise
+				if(self.experiment_type == 2):
+					self.twist.angular.z = -self.automower_rot_vel
+				else:
+					self.twist.angular.z = self.automower_rot_vel
+				self.pub_odom_navigation.publish(self.twist)
+			self.stage_change = False
+			
+
+		if(self.stage % 2 == 1):
+			#print(self.distance_calc(self.stage_init_x, self.stage_init_y, self.x, self.y))
+			distance = self.distance_calc(self.stage_init_x, self.stage_init_y, self.x, self.y)
+			
+			#Update figure while moving forward, but not too close to rotation point 
+			if(distance < self.experiment_side_length - 0.25):
+				self.plot_figure()
+			#End of state if distance travelled is distance reached
+			if(distance > self.experiment_side_length):
+				print(self.distance_calc(self.stage_init_x, self.stage_init_y, self.x, self.y), self.experiment_side_length)
+				#reset command
+				self.twist.linear.x = 0
+				self.twist.angular.z = 0
+				self.pub_odom_navigation.publish(self.twist)
+				self.stage_change = True
+		else:
+			#End of rotation stage if rotated 90 degrees, within a margin e.g. 0.2
+			if(abs(self.angle_diff(self.stage_init_ori, self.orientation)) > math.radians(90 - 0.2)):
+				print(abs(self.angle_diff(self.stage_init_ori, self.orientation)), math.radians(90))
+				#reset command
+				self.twist.linear.x = 0
+				self.twist.angular.z = 0
+				self.pub_odom_navigation.publish(self.twist)
+				self.stage_change = True
+		
+		#End of experiment (8 stages, 4 straights, 4 corners)
+		if(self.stage > 8):
+			#reset command
+			self.twist.linear.x = 0
+			self.twist.angular.z = 0
+			self.pub_odom_navigation.publish(self.twist)
+			self.stage = 0
+			self.experiment_shutting_down = True
+
+	#Compute distance, pythag on delta X and Y
+	def distance_calc(self, x_start, y_start, x, y):
+		return math.sqrt((x_start - x)**2 + (y_start - y)**2)
+
+	#Difference in angles in range -pi -> pi, 
+	def angle_diff(self, theta1, theta2):
+		temp = theta1 - theta2
+		
+		if( temp > math.radians(180) ):
+			temp -= math.radians(360)
+		elif(temp < math.radians(-180)):
+			temp += math.radians(360)
+		return temp
 
 	def write_data(self):
 		#Get initial variables from simulator
@@ -215,7 +319,11 @@ class automower_tracking_simulator(object):
 		self.file.write("Time = " + str(self.time) + "\n")
 		self.file.write("Odometry: x = " + str(self.x) + " y = " + str(self.y) + " theta = " + str(self.orientation) + "\n")
 		self.file.write("Actual	: x = " + str(data.pose[index].position.x) + " y = " + str(data.pose[index].position.y) + " theta = " + str(self.quarternion_to_angle(data.pose[index].orientation.x, data.pose[index].orientation.y,data.pose[index].orientation.z,data.pose[index].orientation.w)) + "\n\n")
-		
+
+		#print actual position info to screen
+		#print(data.pose[index])	
+		#print(self.orientation)	
+
 		#Record x and y, and x and y predictions from odometry
 		self.x_odom_points.append(self.x)
 		self.y_odom_points.append(self.y)
@@ -232,7 +340,7 @@ class automower_tracking_simulator(object):
 		#start new experiment with data.data length
 		if(data.data > 0):
 			if not(self.experiment_running):
-				self.experiment_run_time = data.data
+				self.experiment_type = data.data
 				self.experiment_starting_up = True
 		#Stop current experiment	
 		if(data.data < 0):
@@ -251,26 +359,37 @@ class automower_tracking_simulator(object):
 			self.file.close()
 
 			print("Finishing Experiment...")
-			#Clear points and axis
-			plt.cla()
-			plt.clf()
-			#Plot actual x co-ords
-			plt.plot(self.x_points, self.y_points, 'k')
-			#Plot odometry calculated points
-			plt.plot(self.x_odom_points, self.y_odom_points, 'b--')
+			self.plot_figure()
 
-			#concatenate all x and all y points for min and max calculations for the graphs axis
-			all_x_points = np.concatenate([self.x_points,self.x_odom_points])
-			all_y_points = np.concatenate([self.y_points,self.y_odom_points])
-
-			#Set axis based on min and max vals in x and y
-			plt.axis([np.amin(all_x_points) - 1, np.amax(all_x_points) + 1, np.amin(all_y_points) - 1, np.amax(all_y_points) + 1])
-			plt.savefig(self.file_path+'.png')
-			#Save the png as a JPEG
-			image = Image.open(self.file_path+'.png').save(self.file_path+'.jpg','JPEG')
+			#reset odom controller
+			if(self.experiment_type > 1):
+				self.twist.linear.x = 0
+				self.twist.angular.z = 0
+				self.pub_odom_navigation.publish(self.twist)
+				self.stage = 0
 			
 			#Running var set to false to signal the end of the experiment			
 			self.experiment_running = False
+
+	def plot_figure(self):
+		#Clear points and axis
+		plt.cla()
+		plt.clf()
+		#Plot actual x co-ords
+		plt.plot(self.x_points, self.y_points, 'k')
+		#Plot odometry calculated points
+		plt.plot(self.x_odom_points, self.y_odom_points, 'b--')
+
+		#concatenate all x and all y points for min and max calculations for the graphs axis
+		all_x_points = np.concatenate([self.x_points,self.x_odom_points])
+		all_y_points = np.concatenate([self.y_points,self.y_odom_points])
+		
+		#axis sqaured off, uniform in x and y
+		plt.axis('equal')
+		#Set axis based on min and max vals in x and y
+		plt.axis([np.amin(all_x_points) - 1, np.amax(all_x_points) + 1, np.amin(all_y_points) - 1, np.amax(all_y_points) + 1])
+		#Save figure to file
+		plt.savefig(self.file_path+'.png')
 		
 
 	def idle(self):
